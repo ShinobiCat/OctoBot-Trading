@@ -37,7 +37,7 @@ import octobot_trading.exchanges.util.exchange_util as exchange_util
 def create_client(
     exchange_class, exchange_manager, logger, options, headers,
     additional_config, should_authenticate, unauthenticated_exchange_fallback=None,
-    keys_adapter=None, allow_request_counter: bool = True
+    keys_adapter=None, allow_request_counter: bool = True, hostname=None
 ):
     """
     Exchange instance creation
@@ -68,7 +68,8 @@ def create_client(
                     _get_client_config(
                         options, headers, additional_config,
                         api_key=key, secret=secret, password=password, uid=uid,
-                        auth_token=auth_token, auth_token_header_prefix=auth_token_header_prefix
+                        auth_token=auth_token, auth_token_header_prefix=auth_token_header_prefix,
+			hostname=hostname
                     ),
                     exchange_manager.exchange_name,
                     exchange_manager.proxy_config,
@@ -83,7 +84,8 @@ def create_client(
                     _get_client_config(options, headers, additional_config),
                     exchange_manager.exchange_name,
                     exchange_manager.proxy_config,
-                    allow_request_counter=allow_request_counter
+                    allow_request_counter=allow_request_counter,
+		    hostname=hostname
                 )
         except (ccxt.AuthenticationError, Exception) as e:
             if unauthenticated_exchange_fallback is None:
@@ -301,7 +303,8 @@ def _use_proxy_if_necessary(client, proxy_config: proxy_config_import.ProxyConfi
 def _get_client_config(
     options, headers, additional_config,
     api_key=None, secret=None, password=None, uid=None,
-    auth_token=None, auth_token_header_prefix=None
+    auth_token=None, auth_token_header_prefix=None,
+    hostname=None
 ):
     if auth_token:
         headers["Authorization"] = f"{auth_token_header_prefix or ''}{auth_token}"
@@ -320,6 +323,8 @@ def _get_client_config(
         config['password'] = password
     if uid is not None:
         config['uid'] = uid
+    if hostname is not None:
+	config['hostname'] = hostname
     config.update(additional_config or {})
     return config
 

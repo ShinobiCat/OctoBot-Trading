@@ -39,6 +39,7 @@ import octobot_trading.exchanges.connectors.ccxt.enums as ccxt_enums
 import octobot_trading.exchanges.connectors.ccxt.constants as ccxt_constants
 import octobot_trading.personal_data as personal_data
 from octobot_trading.enums import ExchangeConstantsOrderColumns as ecoc
+from octobot_trading.exchanges.config.custom_base_url import CustomBaseUrlConfig as cbucfg
 
 
 def _retried_failed_network_request(func):
@@ -76,7 +77,8 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
     """
 
     def __init__(
-        self, config, exchange_manager, adapter_class=None, additional_config=None, rest_name=None, force_auth=False
+        self, config, exchange_manager, adapter_class=None, additional_config=None, rest_name=None, force_auth=False,
+	custom_base_url=None
     ):
         super().__init__(config, exchange_manager, None)
         self.client = None
@@ -86,6 +88,13 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
         self.is_authenticated = False
         self.rest_name = rest_name or self.exchange_manager.exchange_class_string
         self.force_authentication = force_auth
+
+	# Set custom hostname if base url is selected, overriding CCXT defaults when necessary
+        self.hostrenamed = None
+        self.custom_base_url = "myokx"
+        if self.custom_base_url:
+            exchange_name = self.exchange_manager.exchange_class_string.lower()
+            self.hostrenamed = cbucfg.get_custom_base_url(exchange_name, self.custom_base_url)
 
         # used to save exchange local elements in subclasses
         self.saved_data = {}
@@ -260,7 +269,7 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
             self.exchange_type, self.exchange_manager, self.logger,
             self.options, self.headers, self.additional_config,
             False if force_unauth else self._should_authenticate(), self.unauthenticated_exchange_fallback,
-            keys_adapter=keys_adapter
+            keys_adapter=keys_adapter, hostname=self.hostrenamed
         )
 
     def _should_authenticate(self):
