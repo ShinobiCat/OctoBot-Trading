@@ -14,6 +14,9 @@
 #  You should have received a copy of the GNU Lesser General Public
 #  License along with this library.
 import asyncio
+import aiohttp_socks
+import os
+import ssl
 import aiohttp
 import copy
 import logging
@@ -44,11 +47,14 @@ def create_client(
     :return: the created ccxt (pro, async or sync) client
     """
     is_authenticated = False
+    should_be_authenticated_exchange = should_authenticate and not exchange_manager.is_backtesting
     if not exchange_manager.exchange_only:
         # avoid logging version on temporary exchange_only exchanges
         exchange_type = exchange_util.get_exchange_type(exchange_manager)
-        logger.info(f"Creating {exchange_class.__name__} {exchange_type.name} "
-                    f"exchange with ccxt in version {ccxt.__version__}")
+        logger.info(
+            f"Creating {'' if should_be_authenticated_exchange else 'un'}authenticated {exchange_class.__name__} "
+            f"{exchange_type.name} exchange with ccxt in version {ccxt.__version__}"
+        )
     if exchange_manager.ignore_config or exchange_manager.check_config(exchange_manager.exchange_name):
         try:
             auth_token_header_prefix = None
@@ -62,11 +68,11 @@ def create_client(
             if not (key and secret) and not exchange_manager.is_simulated and not exchange_manager.ignore_config:
                 logger.warning(f"No exchange API key set for {exchange_manager.exchange_name}. "
                                f"Enter your account details to enable real trading on this exchange.")
-            if should_authenticate and not exchange_manager.is_backtesting:
+            if should_be_authenticated_exchange:
                 client = instantiate_exchange(
                     exchange_class,
                     _get_client_config(
-                        options, headers, additional_config,
+                        exchange_class, options, headers, additional_config,
                         api_key=key, secret=secret, password=password, uid=uid,
                         auth_token=auth_token, auth_token_header_prefix=auth_token_header_prefix,
 			hostname=hostname
@@ -81,7 +87,7 @@ def create_client(
             else:
                 client = instantiate_exchange(
                     exchange_class,
-                    _get_client_config(options, headers, additional_config),
+                    _get_client_config(exchange_class, options, headers, additional_config),
                     exchange_manager.exchange_name,
                     exchange_manager.proxy_config,
                     allow_request_counter=allow_request_counter,
@@ -130,7 +136,10 @@ def get_unauthenticated_exchange(
     exchange_class, options, headers, additional_config, identifier: str, proxy_config: proxy_config_import.ProxyConfig
 ) -> async_ccxt.Exchange:
     return instantiate_exchange(
-        exchange_class, _get_client_config(options, headers, additional_config), identifier, proxy_config
+        exchange_class,
+        _get_client_config(exchange_class, options, headers, additional_config),
+        identifier,
+        proxy_config
     )
 
 
@@ -141,7 +150,10 @@ def instantiate_exchange(
     client = exchange_class(config)
     _use_proxy_if_necessary(client, proxy_config)
     if constants.ENABLE_CCXT_REQUESTS_COUNTER and allow_request_counter:
-        _use_request_counter(identifier, client)
+        if proxy_config.socks_proxy or proxy_config.socks_proxy_callback:
+            commons_logging.get_logger(__name__).error("socks proxy and request counter can't yet be used together.")
+        else:
+            _use_request_counter(identifier, client, proxy_config)
     return client
 
 
@@ -183,7 +195,7 @@ def get_ccxt_client_login_options(exchange_manager):
     return {'defaultType': 'spot'}
 
 
-def get_symbols(client, active_only):
+def get_symbols(client, active_only) -> set[str]:
     try:
         if active_only:
             return set(
@@ -238,7 +250,11 @@ def get_pair_cryptocurrency(client, pair) -> str:
 
 
 def get_contract_size(client, pair) -> float:
-    return client.markets[pair][ccxt_enums.ExchangeConstantsMarketStatusCCXTColumns.CONTRACT_SIZE.value]
+    return get_market_status_contract_size(client.markets[pair])
+
+
+def get_market_status_contract_size(market_status: dict) :
+    return market_status[ccxt_enums.ExchangeConstantsMarketStatusCCXTColumns.CONTRACT_SIZE.value]
 
 
 def get_fees(market_status) -> dict:
@@ -298,10 +314,55 @@ def _use_proxy_if_necessary(client, proxy_config: proxy_config_import.ProxyConfi
         client.socks_proxy = proxy_config.socks_proxy
     if proxy_config.socks_proxy_callback:
         client.socks_proxy_callback = proxy_config.socks_proxy_callback
+    if proxy_config.socks_proxy or proxy_config.socks_proxy_callback:
+        # rewrite of async_ccxt.exchange.client.fetch() ProxyConnector creation
+        _init_ccxt_client_session_requirements(client)
+        proxy_url = proxy_config.get_proxy_url()
+        if (client.socks_proxy_sessions is None):
+            client.socks_proxy_sessions = {}
+        if (proxy_url not in client.socks_proxy_sessions):
+            connector = aiohttp_socks.ProxyConnector.from_url(
+                proxy_url,
+                # extra args copied from self.open()
+                ssl=client.ssl_context,
+                loop=client.asyncio_loop,
+                use_dns_cache=not proxy_config.disable_dns_cache,
+                enable_cleanup_closed=True
+            )
+            client.socks_proxy_sessions[proxy_url] = aiohttp.ClientSession(
+                loop=client.asyncio_loop, connector=connector, trust_env=client.aiohttp_trust_env
+            )
+    elif proxy_config.disable_dns_cache:
+        # rewrite of async_ccxt.exchange.client.open()
+        _init_ccxt_client_session_requirements(client)
+        if client.session:
+            # should not happen
+            asyncio.create_task(client.session.close())
+        connector = aiohttp.TCPConnector(
+            ssl=client.ssl_context, loop=client.asyncio_loop, enable_cleanup_closed=True,
+            # local overrides
+            use_dns_cache=False
+            # end local overrides
+        )
+        client.session = aiohttp.ClientSession(
+            loop=client.asyncio_loop, connector=connector, trust_env=client.aiohttp_trust_env
+        )
+
+
+def _init_ccxt_client_session_requirements(client):
+    # from async_ccxt.exchange.client.open()
+    if client.asyncio_loop is None:
+        client.asyncio_loop = asyncio.get_running_loop()
+        client.throttle.loop = client.asyncio_loop
+
+    if client.ssl_context is None:
+        # Create our SSL context object with our CA cert file
+        client.ssl_context = ssl.create_default_context(cafile=client.cafile) if client.verify else client.verify
+
 
 
 def _get_client_config(
-    options, headers, additional_config,
+    exchange_class, options, headers, additional_config,
     api_key=None, secret=None, password=None, uid=None,
     auth_token=None, auth_token_header_prefix=None,
     hostname=None
@@ -323,13 +384,53 @@ def _get_client_config(
         config['password'] = password
     if uid is not None:
         config['uid'] = uid
-    if hostname is not None:
-	config['hostname'] = hostname
-    config.update(additional_config or {})
+    config.update({**_get_custom_domain_config(exchange_class), **(additional_config or {})})
     return config
 
 
-def _use_request_counter(identifier: str, ccxt_client: async_ccxt.Exchange):
+def _get_custom_domain_config(exchange_class):
+    old, new = _get_replaced_custom_domains(exchange_class)
+    if not (old and new):
+        return {}
+    if url_config := exchange_class().describe()[ccxt_enums.ExchangeColumns.URLS.value]:
+        commons_logging.get_logger(__name__).info(
+            f"Using custom domain for {exchange_class.__name__}: {old} is replaced by {new}"
+        )
+        return {
+            ccxt_enums.ExchangeColumns.URLS.value: _get_patched_url_config(url_config, old, new)
+        }
+    return {}
+
+
+def _get_replaced_custom_domains(exchange_class):
+    identifier = exchange_class.__name__.upper()
+    if custom_domain := os.getenv(f"{identifier}_CUSTOM_DOMAIN"):
+        split = custom_domain.split(":")
+        if len(split) == 2:
+            return split[0], split[1]
+        else:
+            commons_logging.get_logger(__name__).error(
+                f"Invalid {identifier} custom domain config. Expected syntax is to_replace_domain:updated_domain "
+                f"Example: MEXC_CUSTOM_DOMAIN=mexc.com:mexc.co"
+            )
+    return None, None
+
+
+def _get_patched_url_config(url_config: dict, old: str, new: str):
+    updated_config = {}
+    for key, val in url_config.items():
+        if isinstance(val, dict):
+            updated_config[key] = _get_patched_url_config(val, old, new)
+        elif isinstance(val, str):
+            updated_config[key] = val.replace(old, new)
+        else:
+            updated_config[key] = val
+    return updated_config
+
+
+def _use_request_counter(
+    identifier: str, ccxt_client: async_ccxt.Exchange, proxy_config: proxy_config_import.ProxyConfig
+):
     """
     Replaces the given exchange async session by an aiohttp_util.CounterClientSession
     WARNING: should only be called right after creating the exchange and on the same async loop as
@@ -344,7 +445,8 @@ def _use_request_counter(identifier: str, ccxt_client: async_ccxt.Exchange):
         # same as in ccxt.async_support.exchange.py#open()
         # connector = aiohttp.TCPConnector(ssl=self.ssl_context, loop=self.asyncio_loop, enable_cleanup_closed=True)
         new_connector = aiohttp.TCPConnector(
-            ssl=ccxt_client.ssl_context, loop=ccxt_client.asyncio_loop, enable_cleanup_closed=True
+            ssl=ccxt_client.ssl_context, loop=ccxt_client.asyncio_loop,
+            enable_cleanup_closed=True, use_dns_cache=not proxy_config.disable_dns_cache
         )
         counter_session = aiohttp_util.CounterClientSession(
             identifier,
@@ -365,3 +467,45 @@ def _use_request_counter(identifier: str, ccxt_client: async_ccxt.Exchange):
 
 def ccxt_exchange_class_factory(exchange_name):
     return getattr(async_ccxt, exchange_name)
+
+def reraise_with_proxy_prefix_if_relevant(
+    ccxt_connector, cause_error: Exception, raised_error: typing.Optional[Exception]
+):
+    was_proxied, last_proxied_request_url = was_latest_request_proxied(ccxt_connector)
+    if was_proxied:
+        raised = raised_error or cause_error
+        raise raised.__class__(f"[Proxied] {raised} [URL: {last_proxied_request_url}]") from cause_error
+
+
+def was_latest_request_proxied(ccxt_connector) -> (bool, str):
+    if not (
+        ccxt_connector.exchange_manager.proxy_config
+        and ccxt_connector.exchange_manager.proxy_config.get_last_proxied_request_url
+    ):
+        return False, ""
+    last_proxied_request_url = ccxt_connector.exchange_manager.proxy_config.get_last_proxied_request_url()
+    last_client_request_url = ccxt_connector.client.last_request_url
+    # if last requests are matching: it was proxied
+    if last_proxied_request_url:
+        url_without_param = last_proxied_request_url.split("?")[0]
+        return last_proxied_request_url == last_client_request_url, url_without_param
+    return False, ""
+
+
+def get_proxy_error_if_any(ccxt_connector, error: Exception) -> typing.Optional[Exception]:
+    if not ccxt_connector.exchange_manager.proxy_config:
+        return None
+    max_depth = 10
+    depth = 1
+    cause_error = error
+    while cause_error and depth < max_depth:
+        if isinstance(cause_error, (
+            aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError, aiohttp_socks.ProxyConnectionError
+        )) or (
+            isinstance(cause_error, aiohttp.ClientConnectorError)
+            and ccxt_connector.exchange_manager.proxy_config.proxy_host in str(cause_error)
+        ):
+            return cause_error
+        depth += 1
+        cause_error = getattr(cause_error, "__cause__", None)
+    return None

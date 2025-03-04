@@ -4,6 +4,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.160] - 2025-03-03
+### Added
+[CCXT] fix fees computation
+
+## [2.4.159] - 2025-02-24
+### Added
+[Exchanges] get_alias_symbols
+
+## [2.4.158] - 2025-02-22
+### Updated
+[Exchanges] skip auth for non trading exchanges
+
+## [2.4.157] - 2025-02-17
+### Added
+[Futures] add use_wallet_balance_on_futures to portfolio_to_float
+
+## [2.4.156] - 2025-02-10
+### Added
+[TradingModes] add init topic methods
+### Updated
+[Amount] improve amount error
+[Exchange] add proxy error details on ddos error
+[Trades] log more details on loaded historical trades
+
+## [2.4.155] - 2025-02-03
+### Added
+[Exchanges] handle Socks proxies
+### Updated
+[Trader] enable edit_order when without enable_order_auto_synchronization
+
+## [2.4.154] - 2025-01-31
+### Added
+[Exchanges] handle InvalidAPIKeyIPWhitelistError
+
+## [2.4.153] - 2025-01-29
+### Updated
+[TradingMode] make register_chained_order more flexible
+
+## [2.4.152] - 2025-01-28
+### Fixed
+[Proxy] type error
+
+## [2.4.151] - 2025-01-28
+### Updated
+[Proxy] improve error tools
+
+## [2.4.150] - 2025-01-27
+### Added
+[Proxy] Proxy related errors and prefixes
+
+## [2.4.149] - 2025-01-22
+### Added
+[PersonalData] add get_trade_or_open_order and improve typing
+
+## [2.4.148] - 2025-01-20
+### Added
+[Exchanges] support custom domains
+[Exchanges] add INCLUDE_DISABLED_SYMBOLS_IN_AVAILABLE_SYMBOLS
+
+## [2.4.147] - 2025-01-13
+### Fixed
+[Exchange] properly propagate ExchangeOrderCancelError
+
+## [2.4.146] - 2025-01-12
+### Added
+[Exceptions] add UntradableSymbolError
+
+## [2.4.145] - 2025-01-11
+### Added
+[Exceptions] add UnsupportedOrderTypeError
+### Fixed
+[Orders] avoid portfolio desync after filled order
+
+## [2.4.144] - 2025-01-10
+### Fixed
+[Backtesting] fix default market status + adapter issues
+
+## [2.4.143] - 2025-01-08
+### Fixed
+[Orders] properly handle trigger above
+
+## [2.4.142] - 2025-01-07
+### Fixed
+[Order] fix _create_triggered_chained_order
+
+## [2.4.141] - 2025-01-05
+### Added
+[TradingSignals] add positions and leverage update
+
+## [2.4.140] - 2025-01-03
+### Updated
+[Positions] properly clear closed positions
+[Exchanges] handle newline error in keys
+### Fixed
+[Exchanges] don't raise on missing order description
+[Orders] fix closed pos & instant fill chained orders
+
+## [2.4.139] - 2023-12-29
+### Updated
+[Simulator] handle futures backtesting with market status and different ccxt classes
+
+## [2.4.138] - 2023-12-28
+### Updated
+[TradingModes] ignore fees in futures chained orders
+
+## [2.4.137] - 2023-12-27
+### Updated
+[Orders] handle reduce only in test tools and in register_chained_order
+
+## [2.4.136] - 2023-12-25
+### Updated
+[Positions] dont update entry price on empty positions
+### Fixed
+[Orders] fix reduce only
+
 ## [2.4.134] - 2023-12-21
 ### Added
 [Orders] add is_stop_trade_order_type

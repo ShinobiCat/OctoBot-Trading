@@ -1,3 +1,4 @@
+# pylint: disable=W0706
 #  Drakkar-Software OctoBot-Trading
 #  Copyright (c) Drakkar-Software, All rights reserved.
 #
@@ -50,6 +51,8 @@ class RestExchange(abstract_exchange.AbstractExchange):
     # set True when get_fixed_market_status should adapt amounts for contract size
     # (amounts are in not kept as contract size with OctoBot)
     ADAPT_MARKET_STATUS_FOR_CONTRACT_SIZE = False
+    # set True when disabled symbols should still be considered (ex: mexc with its temporary api trading disabled symbols)
+    INCLUDE_DISABLED_SYMBOLS_IN_AVAILABLE_SYMBOLS = False
     REQUIRE_ORDER_FEES_FROM_TRADES = False  # set True when get_order is not giving fees on closed orders and fees
     # should be fetched using recent trades.
     REQUIRE_CLOSED_ORDERS_FROM_RECENT_TRADES = False  # set True when get_closed_orders is not supported
@@ -102,6 +105,8 @@ class RestExchange(abstract_exchange.AbstractExchange):
     CAN_HAVE_DELAYED_CANCELLED_ORDERS = False
     # Set True when the "limit" param when fetching order books is taken into account
     SUPPORTS_CUSTOM_LIMIT_ORDER_BOOK_FETCH = False
+    # Set False when the leverage value is set via something else that a set_leverage api (from orders for example)
+    UPDATE_LEVERAGE_FROM_API = True
 
     # text content of errors due to orders not found errors
     EXCHANGE_ORDER_NOT_FOUND_ERRORS: typing.List[typing.Iterable[str]] = []
@@ -119,6 +124,14 @@ class RestExchange(abstract_exchange.AbstractExchange):
     EXCHANGE_ACCOUNT_TRADED_SYMBOL_PERMISSION_ERRORS: typing.List[typing.Iterable[str]] = []
     # text content of errors due to unhandled authentication issues
     EXCHANGE_AUTHENTICATION_ERRORS: typing.List[typing.Iterable[str]] = []
+    # text content of errors due to unhandled IP white list issues
+    EXCHANGE_IP_WHITELIST_ERRORS: typing.List[typing.Iterable[str]] = []
+    # text content of errors due to a closed position on the exchange. Relevant for reduce-only orders
+    EXCHANGE_CLOSED_POSITION_ERRORS: typing.List[typing.Iterable[str]] = []
+    # text content of errors due to an order that would immediately trigger if created. Relevant for stop losses
+    EXCHANGE_ORDER_IMMEDIATELY_TRIGGER_ERRORS: typing.List[typing.Iterable[str]] = []
+    # text content of errors due to an order that can't be cancelled on exchange (because filled or already cancelled)
+    EXCHANGE_ORDER_UNCANCELLABLE_ERRORS: typing.List[typing.Iterable[str]] = []
 
     DEFAULT_CONNECTOR_CLASS = ccxt_connector.CCXTConnector
 
@@ -138,7 +151,7 @@ class RestExchange(abstract_exchange.AbstractExchange):
             exchange_manager,
             adapter_class=self.get_adapter_class(),
             additional_config=self.get_additional_connector_config(),
-            rest_name=self.get_rest_name(),
+            rest_name=self.get_rest_name(self.exchange_manager),
             force_auth=self.REQUIRES_AUTHENTICATION,
         )
 
@@ -166,8 +179,9 @@ class RestExchange(abstract_exchange.AbstractExchange):
         """
         return [enums.ExchangeTypes.SPOT]
 
-    def get_rest_name(self):
-        return self.exchange_manager.exchange_class_string
+    @classmethod
+    def get_rest_name(cls, exchange_manager):
+        return exchange_manager.exchange_class_string
 
     def get_associated_websocket_exchange_name(self):
         return self.exchange_manager.exchange_name
@@ -252,9 +266,9 @@ class RestExchange(abstract_exchange.AbstractExchange):
             if self.should_log_on_ddos_exception(e):
                 self.connector.log_ddos_error(e)
             raise errors.FailedRequest(
-                f"Failed to order operation: {e.__class__.__name__} {html_util.get_html_summary_if_relevant(e)}"
+                f"Failed order operation: {e.__class__.__name__} {html_util.get_html_summary_if_relevant(e)}"
             ) from e
-        except errors.OctoBotExchangeError:
+        except (errors.OctoBotExchangeError, errors.OrderCreationError):
             # custom error: forward it
             raise
         except Exception as e:
@@ -274,6 +288,16 @@ class RestExchange(abstract_exchange.AbstractExchange):
                     f"Error when handling order {html_util.get_html_summary_if_relevant(e)}. "
                     f"Exchange is refusing this order request on this account because "
                     f"of its compliancy requirements."
+                ) from e
+            if self.is_exchange_closed_position_error(e):
+                raise errors.ExchangeClosedPositionError(
+                    f"Error when handling order {html_util.get_html_summary_if_relevant(e)}. "
+                    f"Exchange is refusing this order request because associated position is closed."
+                ) from e
+            if self.is_exchange_order_would_immediately_trigger_error(e):
+                raise errors.ExchangeOrderInstantTriggerError(
+                    f"Error when handling order {html_util.get_html_summary_if_relevant(e)}. "
+                    f"Exchange is refusing this order request because associated order would instantly trigger."
                 ) from e
             self.log_order_creation_error(e, order_type, symbol, quantity, price, stop_price)
             # print(traceback.format_exc(), file=sys.stderr)    # uncomment for debugging in tests
@@ -707,6 +731,27 @@ class RestExchange(abstract_exchange.AbstractExchange):
     def get_rate_limit(self):
         return self.connector.get_rate_limit()
 
+    def get_all_available_symbols(self, active_only=True) -> set[str]:
+        """
+        :return: the list of all symbols supported by the exchange
+        """
+        return self.connector.get_client_symbols(
+            active_only=False if self.INCLUDE_DISABLED_SYMBOLS_IN_AVAILABLE_SYMBOLS else active_only
+        )
+
+    async def get_all_tradable_symbols(self, active_only=True) -> set[str]:
+        """
+        Override if the exchange is not allowing trading for all available symbols (ex: MEXC)
+        :return: the list of all symbols supported by the exchange that can currently be traded through API
+        """
+        return self.get_all_available_symbols(active_only=active_only)
+
+    def get_alias_symbols(self) -> set[str]:
+        """
+        :return: a set of symbol of this exchange that are aliases to other symbols
+        """
+        return set()
+
     async def switch_to_account(self, account_type: enums.AccountTypes):
         return await self.connector.switch_to_account(account_type=account_type)
 
@@ -919,7 +964,10 @@ class RestExchange(abstract_exchange.AbstractExchange):
         :param leverage: the leverage
         :return: the update result
         """
-        return await self.connector.set_symbol_leverage(leverage=leverage, symbol=symbol, **kwargs)
+        if self.UPDATE_LEVERAGE_FROM_API:
+            return await self.connector.set_symbol_leverage(leverage=leverage, symbol=symbol, **kwargs)
+        # nothing to do when UPDATE_LEVERAGE_FROM_API is False
+        return None
 
     async def set_symbol_margin_type(self, symbol: str, isolated: bool, **kwargs: dict):
         """
@@ -988,6 +1036,21 @@ class RestExchange(abstract_exchange.AbstractExchange):
             return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_COMPLIANCY_ERRORS)
         return False
 
+    def is_exchange_closed_position_error(self, error: BaseException) -> bool:
+        if self.EXCHANGE_CLOSED_POSITION_ERRORS:
+            return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_CLOSED_POSITION_ERRORS)
+        return False
+
+    def is_exchange_order_would_immediately_trigger_error(self, error: BaseException) -> bool:
+        if self.EXCHANGE_ORDER_IMMEDIATELY_TRIGGER_ERRORS:
+            return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_ORDER_IMMEDIATELY_TRIGGER_ERRORS)
+        return False
+
+    def is_exchange_order_uncancellable(self, error: BaseException) -> bool:
+        if self.EXCHANGE_ORDER_UNCANCELLABLE_ERRORS:
+            return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_ORDER_UNCANCELLABLE_ERRORS)
+        return False
+
     def is_exchange_internal_sync_error(self, error: BaseException) -> bool:
         if self.EXCHANGE_INTERNAL_SYNC_ERRORS:
             return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_INTERNAL_SYNC_ERRORS)
@@ -1006,6 +1069,11 @@ class RestExchange(abstract_exchange.AbstractExchange):
     def is_authentication_error(self, error: BaseException) -> bool:
         if self.EXCHANGE_AUTHENTICATION_ERRORS:
             return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_AUTHENTICATION_ERRORS)
+        return False
+
+    def is_ip_whitelist_error(self, error: BaseException) -> bool:
+        if self.EXCHANGE_IP_WHITELIST_ERRORS:
+            return exchanges_util.is_error_on_this_type(error, self.EXCHANGE_IP_WHITELIST_ERRORS)
         return False
 
     """

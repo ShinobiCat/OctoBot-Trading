@@ -221,6 +221,7 @@ async def get_local_exchange_manager(
     exchange_name: str, exchange_config: dict, tentacles_setup_config,
     is_sandboxed: bool, ignore_config=False, builder=None, use_cached_markets=True,
     is_broker_enabled: bool = False, exchange_config_by_exchange: typing.Optional[dict[str, dict]] = None,
+    disable_unauth_retry: bool = False,
     market_filter: typing.Union[None, typing.Callable[[dict], bool]] = None
 ):
     exchange_type = exchange_config.get(common_constants.CONFIG_EXCHANGE_TYPE, get_default_exchange_type(exchange_name))
@@ -230,6 +231,7 @@ async def get_local_exchange_manager(
     )
     exchange_manager = await builder.use_tentacles_setup_config(tentacles_setup_config) \
         .is_checking_credentials(False) \
+        .disable_unauth_retry(disable_unauth_retry) \
         .is_sandboxed(is_sandboxed) \
         .is_using_exchange_type(exchange_type) \
         .use_exchange_config_by_exchange(exchange_config_by_exchange) \
@@ -289,6 +291,12 @@ async def is_compatible_account(exchange_name: str, exchange_config: dict, tenta
                 return True, True, None
         except trading_backend.TimeSyncError:
             return False, False, _get_time_sync_error_message(exchange_name, "backend.is_valid_account")
+        except trading_backend.APIKeyPermissionsError as err:
+            return False, False, f"Please update your API Key permissions: {err}"
+        except trading_backend.APIKeyIPWhitelistError as err:
+            return False, False, f"Please update your API Key IP whitelist: {err}"
+        except trading_backend.UnexpectedError as err:
+            return False, False, f"Impossible to check API key: {err}"
         except trading_backend.ExchangeAuthError:
             message = f"Invalid {exchange_name.capitalize()} authentication details"
             if is_sandboxed:
@@ -297,8 +305,6 @@ async def is_compatible_account(exchange_name: str, exchange_config: dict, tenta
                           f"{exchange_name.capitalize()} to trade and validate your api key. " \
                           f"Disable sandbox in your accounts configuration if this is not intended."
             return False, False, message
-        except trading_backend.APIKeyPermissionsError as err:
-            return False, False, f"Please update your API Key permissions: {err}"
         except (AttributeError, Exception) as e:
             return True, False, f"Error when loading exchange account: {e}"
 

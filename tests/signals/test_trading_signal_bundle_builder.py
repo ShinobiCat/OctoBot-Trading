@@ -24,8 +24,9 @@ import octobot_trading.errors as errors
 import octobot_trading.signals as signals
 
 from tests import event_loop
-from tests.exchanges import simulated_trader, simulated_exchange_manager
+from tests.exchanges import simulated_trader, simulated_exchange_manager, future_simulated_exchange_manager
 from tests.personal_data.orders import buy_limit_order, sell_limit_order, stop_loss_limit_order, stop_loss_buy_order
+from tests.exchanges.traders import future_trader_simulator_with_default_linear
 
 import octobot_trading.personal_data as personal_data
 
@@ -52,29 +53,50 @@ def test_build(trading_signal_bundle_builder):
 def test_sort(trading_signal_bundle_builder, buy_limit_order):
     assert trading_signal_bundle_builder.signals == []
     assert trading_signal_bundle_builder.sort_signals().signals == []
-    order_ids = [
+    order_ids_and_pos = [
         f"order_id_{i}"
         for i in range(5)
     ]
-    buy_limit_order.order_id = order_ids[0]
+    buy_limit_order.order_id = order_ids_and_pos[0]
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_amount="1%")
     # add new order (orders are based on order_id)
-    buy_limit_order.order_id = order_ids[1]
+    buy_limit_order.order_id = order_ids_and_pos[1]
     trading_signal_bundle_builder.add_cancelled_order(buy_limit_order, buy_limit_order.exchange_manager)
-    buy_limit_order.order_id = order_ids[2]
+    buy_limit_order.order_id = order_ids_and_pos[2]
     trading_signal_bundle_builder.add_cancelled_order(buy_limit_order, buy_limit_order.exchange_manager)
-    buy_limit_order.order_id = order_ids[3]
+    trading_signal_bundle_builder.add_leverage_update(
+        "BTC/USDT:USDT", None, decimal.Decimal(10), buy_limit_order.exchange_manager
+    )
+    buy_limit_order.order_id = order_ids_and_pos[3]
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_amount="2%")
-    buy_limit_order.order_id = order_ids[4]
+    buy_limit_order.order_id = order_ids_and_pos[4]
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_amount="3%")
+    trading_signal_bundle_builder.add_leverage_update(
+        "ETH/USDT:USDT", None, decimal.Decimal(11), buy_limit_order.exchange_manager
+    )
+    # add position symbols
+    order_ids_and_pos.insert(3, "BTC/USDT:USDT")
+    order_ids_and_pos.insert(6, "ETH/USDT:USDT")
 
     origin_signals = copy.copy(trading_signal_bundle_builder.signals)
-    assert order_ids == [signal.content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] for signal in origin_signals]
+    expected = [
+        signal.content.get(enums.TradingSignalOrdersAttrs.ORDER_ID.value) or signal.content[enums.TradingSignalPositionsAttrs.SYMBOL.value]
+        for signal in origin_signals
+    ]
+    assert order_ids_and_pos == expected, f"{order_ids_and_pos} != {expected}"
     builder = trading_signal_bundle_builder.sort_signals()
     assert builder is trading_signal_bundle_builder
     sorted_signals = builder.signals
-    sorted_ids = [order_ids[1], order_ids[2], order_ids[0], order_ids[3], order_ids[4]]
-    assert sorted_ids == [signal.content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] for signal in sorted_signals]
+    sorted_ids = [
+        order_ids_and_pos[1], order_ids_and_pos[2], # cancelled
+        "BTC/USDT:USDT", "ETH/USDT:USDT",    # positions updates
+        order_ids_and_pos[0], order_ids_and_pos[4], order_ids_and_pos[5]    # others
+    ]
+    sorted_signals_keys = [
+        signal.content.get(enums.TradingSignalOrdersAttrs.ORDER_ID.value) or signal.content[enums.TradingSignalPositionsAttrs.SYMBOL.value]
+        for signal in sorted_signals
+    ]
+    assert sorted_ids == sorted_signals_keys, f"{sorted_ids} != {sorted_signals_keys}"
 
 
 def test_add_created_order(trading_signal_bundle_builder, buy_limit_order):
@@ -82,6 +104,7 @@ def test_add_created_order(trading_signal_bundle_builder, buy_limit_order):
         trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager)
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_amount="1%")
     assert len(trading_signal_bundle_builder.signals) == 1
+    assert trading_signal_bundle_builder.signals[0].topic == enums.TradingSignalTopics.ORDERS.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
            is enums.TradingSignalOrdersActions.CREATE.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] == \
@@ -96,16 +119,19 @@ def test_add_created_order(trading_signal_bundle_builder, buy_limit_order):
 
     # update the same order
     buy_limit_order.order_type = enums.TraderOrderType.SELL_LIMIT
+    buy_limit_order.trigger_above = False
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_position="2%")
     assert len(trading_signal_bundle_builder.signals) == 1
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TYPE.value] == enums.TraderOrderType.SELL_LIMIT.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TARGET_AMOUNT.value] is None
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TARGET_POSITION.value] == "2%"
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TRIGGER_ABOVE.value] is False
 
     # add new order (orders are based on order_id)
     previous_order_id = buy_limit_order.order_id
     buy_limit_order.order_id = "other_id"
     buy_limit_order.order_type = enums.TraderOrderType.STOP_LOSS_LIMIT
+    buy_limit_order.trigger_above = True
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_position="50")
     assert len(trading_signal_bundle_builder.signals) == 2
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] == \
@@ -113,11 +139,13 @@ def test_add_created_order(trading_signal_bundle_builder, buy_limit_order):
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TYPE.value] == enums.TraderOrderType.SELL_LIMIT.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TARGET_AMOUNT.value] is None
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TARGET_POSITION.value] == "2%"
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.TRIGGER_ABOVE.value] is False
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] == "other_id"
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.TYPE.value] == \
            enums.TraderOrderType.STOP_LOSS_LIMIT.value
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.TARGET_AMOUNT.value] is None
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.TARGET_POSITION.value] == "50"
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.TRIGGER_ABOVE.value] is True
 
 
 def test_add_order_to_group(trading_signal_bundle_builder, buy_limit_order):
@@ -125,6 +153,7 @@ def test_add_order_to_group(trading_signal_bundle_builder, buy_limit_order):
     trading_signal_bundle_builder.add_order_to_group(buy_limit_order, buy_limit_order.exchange_manager)
     # ensure properly added
     assert len(trading_signal_bundle_builder.signals) == 1
+    assert trading_signal_bundle_builder.signals[0].topic == enums.TradingSignalTopics.ORDERS.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
            is enums.TradingSignalOrdersActions.ADD_TO_GROUP.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] == \
@@ -186,6 +215,7 @@ def test_add_edited_order(trading_signal_bundle_builder, buy_limit_order):
     trading_signal_bundle_builder.add_edited_order(buy_limit_order, buy_limit_order.exchange_manager, updated_target_amount="1%")
     # ensure properly added
     assert len(trading_signal_bundle_builder.signals) == 1
+    assert trading_signal_bundle_builder.signals[0].topic == enums.TradingSignalTopics.ORDERS.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
            is enums.TradingSignalOrdersActions.EDIT.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] == \
@@ -251,10 +281,73 @@ def test_add_edited_order(trading_signal_bundle_builder, buy_limit_order):
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.UPDATED_TARGET_POSITION.value] == "1%a"
 
 
+def test_add_leverage_update(trading_signal_bundle_builder, future_trader_simulator_with_default_linear):
+    _, exchange_manager_inst, trader_inst, default_contract = future_trader_simulator_with_default_linear
+    trading_signal_bundle_builder.add_leverage_update("BTC/USDT:USDT", None, decimal.Decimal(10) , exchange_manager_inst)
+    # ensure properly added
+    assert len(trading_signal_bundle_builder.signals) == 1
+    assert trading_signal_bundle_builder.signals[0].topic == enums.TradingSignalTopics.POSITIONS.value
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
+           is enums.TradingSignalPositionsActions.EDIT.value
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.EXCHANGE.value] == \
+           exchange_manager_inst.exchange_name
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.STRATEGY.value] == \
+           trading_signal_bundle_builder.strategy
+    assert (trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.SYMBOL.value] ==
+            "BTC/USDT:USDT")
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.SIDE.value] == None
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.LEVERAGE.value] == 10
+
+    trading_signal_bundle_builder.add_leverage_update("ETH/USD:ETH", enums.PositionSide.SHORT, decimal.Decimal(1) , exchange_manager_inst)
+    # ensure properly added
+    assert len(trading_signal_bundle_builder.signals) == 2
+    assert trading_signal_bundle_builder.signals[1].topic == enums.TradingSignalTopics.POSITIONS.value
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
+           is enums.TradingSignalPositionsActions.EDIT.value
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.EXCHANGE.value] == \
+           exchange_manager_inst.exchange_name
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.STRATEGY.value] == \
+           trading_signal_bundle_builder.strategy
+    assert (trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.SYMBOL.value] ==
+            "ETH/USD:ETH")
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.SIDE.value] == enums.PositionSide.SHORT.value
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.LEVERAGE.value] == 1
+
+    # update 1st signal: just change leverage value
+    trading_signal_bundle_builder.add_leverage_update("BTC/USDT:USDT", None, decimal.Decimal(20) , exchange_manager_inst)
+    assert len(trading_signal_bundle_builder.signals) == 2
+    assert trading_signal_bundle_builder.signals[0].topic == enums.TradingSignalTopics.POSITIONS.value
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
+           is enums.TradingSignalPositionsActions.EDIT.value
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.EXCHANGE.value] == \
+           exchange_manager_inst.exchange_name
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.STRATEGY.value] == \
+           trading_signal_bundle_builder.strategy
+    assert (trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.SYMBOL.value] ==
+            "BTC/USDT:USDT")
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.SIDE.value] == None
+    assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalPositionsAttrs.LEVERAGE.value] == 20 # updated
+
+    # update 2nd signal: just change leverage value
+    trading_signal_bundle_builder.add_leverage_update("ETH/USD:ETH", enums.PositionSide.SHORT, decimal.Decimal(100) , exchange_manager_inst)
+    assert trading_signal_bundle_builder.signals[1].topic == enums.TradingSignalTopics.POSITIONS.value
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
+           is enums.TradingSignalPositionsActions.EDIT.value
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.EXCHANGE.value] == \
+           exchange_manager_inst.exchange_name
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.STRATEGY.value] == \
+           trading_signal_bundle_builder.strategy
+    assert (trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.SYMBOL.value] ==
+            "ETH/USD:ETH")
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.SIDE.value] == enums.PositionSide.SHORT.value
+    assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalPositionsAttrs.LEVERAGE.value] == 100 # updated
+
+
 @pytest.mark.asyncio
 async def test_add_cancelled_order(trading_signal_bundle_builder, buy_limit_order):
     trading_signal_bundle_builder.add_cancelled_order(buy_limit_order, buy_limit_order.exchange_manager)
     assert len(trading_signal_bundle_builder.signals) == 1
+    assert trading_signal_bundle_builder.signals[0].topic == enums.TradingSignalTopics.ORDERS.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalCommonsAttrs.ACTION.value] \
            is enums.TradingSignalOrdersActions.CANCEL.value
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ORDER_ID.value] == \
@@ -356,15 +449,44 @@ def test_pack_referenced_orders_together(trading_signal_bundle_builder,
     trading_signal_bundle_builder.add_created_order(buy_limit_order, buy_limit_order.exchange_manager, target_amount="1%")
     trading_signal_bundle_builder.add_created_order(sell_limit_order, buy_limit_order.exchange_manager, target_amount="1%")
     trading_signal_bundle_builder.add_created_order(stop_loss_limit_order, buy_limit_order.exchange_manager, target_amount="1%")
-    assert len(trading_signal_bundle_builder.signals) == 3
+    trading_signal_bundle_builder.add_leverage_update("BTC/USDT:USDT", None, decimal.Decimal(5), buy_limit_order.exchange_manager)
+    trading_signal_bundle_builder.add_leverage_update("BTC/USDT:USDT", None, decimal.Decimal(10), buy_limit_order.exchange_manager) # will replace the previous BTC/USDT:USDT signal
+    trading_signal_bundle_builder.add_leverage_update("BTC/USD:BTC", None, decimal.Decimal(6), buy_limit_order.exchange_manager)
+    assert len(trading_signal_bundle_builder.signals) == 5
+    order_signals = [
+        signal
+        for signal in trading_signal_bundle_builder.signals
+        if signal.topic == enums.TradingSignalTopics.ORDERS.value
+    ]
+    position_signals = [
+        signal
+        for signal in trading_signal_bundle_builder.signals
+        if signal.topic == enums.TradingSignalTopics.POSITIONS.value
+    ]
+    assert len(order_signals) == 3
+    assert len(position_signals) == 2
     assert all(signal.content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value] == []
-               for signal in trading_signal_bundle_builder.signals)
+               for signal in order_signals)
+    assert [
+        signal.content[enums.TradingSignalPositionsAttrs.SYMBOL.value]
+        for signal in position_signals
+    ] == ["BTC/USDT:USDT", "BTC/USD:BTC"]
+    assert [
+        signal.content[enums.TradingSignalPositionsAttrs.LEVERAGE.value]
+        for signal in position_signals
+    ] == [10, 6]
     pre_pack_signals = copy.copy(trading_signal_bundle_builder.signals)
     trading_signal_bundle_builder._pack_referenced_orders_together()
     # no order to be packed, no change
-    assert len(trading_signal_bundle_builder.signals) == 3
+    assert len(trading_signal_bundle_builder.signals) == 5
     assert all(signal.content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value] == []
-               for signal in trading_signal_bundle_builder.signals)
+               for signal in trading_signal_bundle_builder.signals
+               if signal.topic == enums.TradingSignalTopics.ORDERS.value)
+    assert [
+        signal.content[enums.TradingSignalPositionsAttrs.SYMBOL.value]
+        for signal in position_signals
+        if signal.topic == enums.TradingSignalTopics.POSITIONS.value
+    ] == ["BTC/USDT:USDT", "BTC/USD:BTC"]
 
     # missing id
     trading_signal_bundle_builder.logger.debug.assert_not_called()
@@ -380,7 +502,12 @@ def test_pack_referenced_orders_together(trading_signal_bundle_builder,
     pre_pack_signals[2].content[enums.TradingSignalOrdersAttrs.BUNDLED_WITH.value] = "0"
     trading_signal_bundle_builder._pack_referenced_orders_together()
     # no order to be packed, no change
-    assert len(trading_signal_bundle_builder.signals) == 2
+    assert len(trading_signal_bundle_builder.signals) == 4
+    assert len([
+        signal
+        for signal in trading_signal_bundle_builder.signals
+        if signal.topic == enums.TradingSignalTopics.ORDERS.value
+    ]) == 2
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][0] \
            is pre_pack_signals[2].content
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value] \
@@ -394,7 +521,12 @@ def test_pack_referenced_orders_together(trading_signal_bundle_builder,
     # also chain sell limit to buy limit
     pre_pack_signals[1].content[enums.TradingSignalOrdersAttrs.CHAINED_TO.value] = "0"
     trading_signal_bundle_builder._pack_referenced_orders_together()
-    assert len(trading_signal_bundle_builder.signals) == 1
+    assert len(trading_signal_bundle_builder.signals) == 3
+    assert len([
+        signal
+        for signal in trading_signal_bundle_builder.signals
+        if signal.topic == enums.TradingSignalTopics.ORDERS.value
+    ]) == 1
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][0] \
            is pre_pack_signals[1].content
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][1] \
@@ -408,7 +540,12 @@ def test_pack_referenced_orders_together(trading_signal_bundle_builder,
     # also chain sell limit to buy limit
     pre_pack_signals[1].content[enums.TradingSignalOrdersAttrs.CHAINED_TO.value] = "0"
     trading_signal_bundle_builder._pack_referenced_orders_together()
-    assert len(trading_signal_bundle_builder.signals) == 1
+    assert len(trading_signal_bundle_builder.signals) == 3
+    assert len([
+        signal
+        for signal in trading_signal_bundle_builder.signals
+        if signal.topic == enums.TradingSignalTopics.ORDERS.value
+    ]) == 1
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][0] \
            is pre_pack_signals[1].content
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][1] \
@@ -423,14 +560,19 @@ def test_pack_referenced_orders_together(trading_signal_bundle_builder,
     trading_signal_bundle_builder.add_created_order(stop_loss_buy_order, buy_limit_order.exchange_manager, target_amount="1%")
     trading_signal_bundle_builder.signals[2].content[enums.TradingSignalOrdersAttrs.BUNDLED_WITH.value] = None
     trading_signal_bundle_builder.signals[2].content[enums.TradingSignalOrdersAttrs.GROUP_ID.value] = "grp"
-    trading_signal_bundle_builder.signals[3].content[enums.TradingSignalOrdersAttrs.GROUP_ID.value] = "grp"
+    trading_signal_bundle_builder.signals[5].content[enums.TradingSignalOrdersAttrs.GROUP_ID.value] = "grp"
     pre_pack_signals = copy.copy(trading_signal_bundle_builder.signals)
     trading_signal_bundle_builder._pack_referenced_orders_together()
     trading_signal_bundle_builder.logger.debug.assert_not_called()
-    assert len(trading_signal_bundle_builder.signals) == 2
+    assert len(trading_signal_bundle_builder.signals) == 4
+    assert len([
+        signal
+        for signal in trading_signal_bundle_builder.signals
+        if signal.topic == enums.TradingSignalTopics.ORDERS.value
+    ]) == 2
     assert trading_signal_bundle_builder.signals[0].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][0] \
            is pre_pack_signals[1].content
     assert trading_signal_bundle_builder.signals[1].content[enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value][0] \
-           is pre_pack_signals[3].content
+           is pre_pack_signals[5].content
     
     trading_signal_bundle_builder.logger.error.assert_not_called()

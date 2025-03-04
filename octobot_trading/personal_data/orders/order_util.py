@@ -1,3 +1,4 @@
+# pylint: disable=W0706
 #  Drakkar-Software OctoBot-Trading
 #  Copyright (c) Drakkar-Software, All rights reserved.
 #
@@ -274,6 +275,9 @@ def get_futures_max_order_size(exchange_manager, symbol, side, current_price, re
         symbol,
         enums.PositionSide.BOTH
     )
+    if reduce_only and current_position.is_idle():
+        # can't reduce an empty position
+        return constants.ZERO, False
     # ensure max position order size is taken into account
     new_position_side = current_position.side
     if new_position_side is enums.PositionSide.UNKNOWN:
@@ -429,7 +433,7 @@ def is_stop_trade_order_type(order_type: enums.TradeOrderType):
     ]
 
 
-def is_take_profit_order(order_type):
+def is_take_profit_order(order_type: enums.TraderOrderType):
     return order_type in [
         enums.TraderOrderType.TAKE_PROFIT, enums.TraderOrderType.TAKE_PROFIT_LIMIT,
     ]
@@ -476,8 +480,12 @@ async def create_as_chained_order(order):
                 order,
                 loaded=False,
                 params=order.exchange_creation_params,
+                raise_all_creation_error=True,
                 **order.trader_creation_kwargs
             )
+        except (errors.ExchangeClosedPositionError, errors.ExchangeOrderInstantTriggerError):
+            # Order can be created and might be outdated forward error for the caller to fix it if possible
+            raise
         except Exception as err:
             # log warning to be sure to keep track of the failed order details
             logging.get_logger(LOGGER_NAME).warning(

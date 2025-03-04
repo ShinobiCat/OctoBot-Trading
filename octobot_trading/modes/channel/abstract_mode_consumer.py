@@ -63,6 +63,9 @@ class AbstractTradingModeConsumer(modes_channel.ModeChannelConsumer):
                               f"Future contract symbols contain the settlement currency after ':'. "
                               f"Example: use BTC/USDT:USDT for linear BTC/USDT contracts and "
                               f"BTC/USD:BTC for inverse BTC/USD contracts.")
+        except (errors.InvalidPositionSide, errors.UnsupportedContractConfigurationError) as err:
+            self.previous_call_error_per_symbol[symbol] = err
+            self.logger.error(f"Impossible to create {symbol} order: {err}.")
         except errors.OrderCreationError as err:
             self.previous_call_error_per_symbol[symbol] = err
             self.logger.info(f"Failed {symbol} order creation on: {self.exchange_manager.exchange_name} "
@@ -114,7 +117,10 @@ class AbstractTradingModeConsumer(modes_channel.ModeChannelConsumer):
                 if await self.can_create_order(symbol, state):
                     try:
                         return await self.create_new_orders(symbol, final_note, state, **kwargs)
-                    except (errors.MissingMinimalExchangeTradeVolume, errors.OrderCreationError):
+                    except (
+                        errors.MissingMinimalExchangeTradeVolume, errors.OrderCreationError,
+                        errors.InvalidPositionSide, errors.UnsupportedContractConfigurationError
+                    ):
                         raise
                     except errors.MissingFunds:
                         try:
@@ -251,7 +257,8 @@ class AbstractTradingModeConsumer(modes_channel.ModeChannelConsumer):
         return position.state.is_active()
 
     async def register_chained_order(
-        self, main_order, price, order_type, side, quantity=None, allow_bundling=True, tag=None
+        self, main_order, price, order_type, side, quantity=None, allow_bundling=True, tag=None, reduce_only=False,
+        update_with_triggering_order_fees=None
     ) -> tuple:
         chained_order = personal_data.create_order_instance(
             trader=self.exchange_manager.trader,
@@ -262,15 +269,21 @@ class AbstractTradingModeConsumer(modes_channel.ModeChannelConsumer):
             price=price,
             side=side,
             associated_entry_id=main_order.order_id,
+            reduce_only=reduce_only,
             tag=tag,
         )
         params = {}
+        # do not reduce chained order amounts to account for fees when trading futures
+        if update_with_triggering_order_fees is None:
+            update_with_triggering_order_fees = not self.exchange_manager.is_future
         if allow_bundling:
             params = await self.exchange_manager.trader.bundle_chained_order_with_uncreated_order(
-                main_order, chained_order, True
+                main_order, chained_order, update_with_triggering_order_fees
             )
         else:
-            await self.exchange_manager.trader.chain_order(main_order, chained_order, True, False)
+            await self.exchange_manager.trader.chain_order(
+                main_order, chained_order, update_with_triggering_order_fees, False
+            )
         return params, chained_order
 
 

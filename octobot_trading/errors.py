@@ -33,6 +33,12 @@ class MissingMinimalExchangeTradeVolume(OctoBotExchangeError):
     """
 
 
+class ExchangeProxyError(OctoBotExchangeError):
+    """
+    Raised when an issue related to an exchange proxy is encountered
+    """
+
+
 class TradingModeIncompatibility(Exception):
     """
     Raised when a trading mode is incompatible with the current situation
@@ -42,6 +48,18 @@ class TradingModeIncompatibility(Exception):
 class OrderCreationError(OctoBotExchangeError):
     """
     Raised upon a failed order creation
+    """
+
+
+class UnsupportedOrderTypeError(OrderCreationError):
+    """
+    Raised when asking for an order type that is not supported by the exchange
+    """
+
+
+class UntradableSymbolError(OrderCreationError):
+    """
+    Raised when a symbol can't currently be traded on the exchange (not in exchange.get_all_tradable_symbols)
     """
 
 
@@ -57,7 +75,13 @@ class OrderCancelError(OctoBotExchangeError):
     """
 
 
-class OrderNotFoundOnCancelError(OrderCancelError):
+class ExchangeOrderCancelError(OrderCancelError):
+    """
+    Raised when an exchange failed to execute the given request because the associated order can't be cancelled
+    """
+
+
+class OrderNotFoundOnCancelError(ExchangeOrderCancelError):
     """
     Raised upon a failed order cancel because order is not found
     """
@@ -123,6 +147,12 @@ class AuthenticationError(OctoBotExchangeError):
     """
 
 
+class InvalidAPIKeyIPWhitelistError(AuthenticationError):
+    """
+    Raised when an exchange failed to authenticate due to an IP whitelist issue
+    """
+
+
 class ExchangeInternalSyncError(OctoBotExchangeError):
     """
     Raised when an exchange is returning an error due to its internal sync process
@@ -140,6 +170,20 @@ class ExchangeAccountSymbolPermissionError(OctoBotExchangeError):
     """
     Raised when an exchange failed to execute the given request because of allowed traded symbols
     on the current user account
+    """
+
+
+class ExchangeClosedPositionError(OctoBotExchangeError):
+    """
+    Raised when an exchange failed to execute the given request because the associated position is closed.
+    Can happen with reduce-only orders
+    """
+
+
+class ExchangeOrderInstantTriggerError(OctoBotExchangeError):
+    """
+    Raised when an exchange failed to execute the given request because the associated order would immediately trigger.
+    Can happen with stop orders
     """
 
 
@@ -189,6 +233,18 @@ class ContractExistsError(Exception):
 class UnhandledContractError(Exception):
     """
     Raised when trying to use a contract that is not supported / implemented
+    """
+
+
+class UnsupportedContractConfigurationError(Exception):
+    """
+    Raised when a contract configuration is not supported
+    """
+
+
+class UnsupportedHedgeContractError(UnsupportedContractConfigurationError):
+    """
+    Raised when a hedge contract configuration is not supported
     """
 
 
@@ -255,6 +311,12 @@ class InvalidArgumentError(Exception):
 class OrderDescriptionNotFoundError(Exception):
     """
     Raised when an order description is not found
+    """
+
+
+class PositionDescriptionNotFoundError(Exception):
+    """
+    Raised when a position description is not found
     """
 
 

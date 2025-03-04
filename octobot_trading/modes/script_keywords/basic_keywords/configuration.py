@@ -20,13 +20,15 @@ import octobot_commons.enums as commons_enums
 import octobot_trading.modes.script_keywords.basic_keywords.user_inputs as user_inputs
 import octobot_trading.enums as enums
 import octobot_trading.errors as errors
+import octobot_trading.constants as constants
 
 
 async def user_select_leverage(
-        ctx,
-        def_val=1,
-        order=None,
-        name="leverage"):
+    ctx,
+    def_val=1,
+    order=None,
+    name=constants.CONFIG_LEVERAGE
+):
     return await user_inputs.user_input(ctx, name, commons_enums.UserInputTypes.INT.value, def_val, order=order)
 
 
@@ -40,9 +42,8 @@ async def user_select_emit_trading_signals(ctx, identifier, def_val=False) -> bo
     return is_emitting_signals
 
 
-async def set_leverage(ctx, leverage):
+async def set_leverage(ctx, leverage, side=None):
     if ctx.exchange_manager.is_future:
-        side = None
         try:
             await ctx.exchange_manager.trader.set_leverage(ctx.symbol, side, decimal.Decimal(str(leverage)))
         except errors.ContractExistsError as e:

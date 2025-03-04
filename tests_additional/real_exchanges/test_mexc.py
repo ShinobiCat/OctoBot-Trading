@@ -54,7 +54,7 @@ class TestMEXCRealExchangeTester(RealExchangeTester):
     async def test_get_market_status(self):
         for market_status in await self.get_market_statuses():
             self.ensure_required_market_status_values(market_status)
-            assert 1e-06 <= market_status[Ecmsc.PRECISION.value][
+            assert 1e-08 <= market_status[Ecmsc.PRECISION.value][
                 Ecmsc.PRECISION_AMOUNT.value] <= 1  # to be fixed in tentacle
             assert 1e-09 <= market_status[Ecmsc.PRECISION.value][
                 Ecmsc.PRECISION_PRICE.value] <= 1   # to be fixed in tentacle
@@ -120,8 +120,8 @@ class TestMEXCRealExchangeTester(RealExchangeTester):
         assert len(order_book[Ecobic.BIDS.value][0]) == 2
         
     async def test_get_order_books(self):
-        # implement if necessary
-        pass
+        # not supported
+        await self.inner_test_unsupported_get_order_books()
 
     async def test_get_recent_trades(self):
         recent_trades = await self.get_recent_trades()

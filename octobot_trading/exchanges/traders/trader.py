@@ -87,9 +87,10 @@ class Trader(util.Initializable):
     Orders
     """
 
-    async def create_order(self, order, loaded: bool = False, params: dict = None,
-                           wait_for_creation=True,
-                           creation_timeout=octobot_trading.constants.INDIVIDUAL_ORDER_SYNC_TIMEOUT):
+    async def create_order(
+        self, order, loaded: bool = False, params: dict = None, wait_for_creation=True, raise_all_creation_error=False,
+        creation_timeout=octobot_trading.constants.INDIVIDUAL_ORDER_SYNC_TIMEOUT
+    ):
         """
         Create a new order from an OrderFactory created order, update portfolio, registers order in order manager and
         notifies order channel.
@@ -99,6 +100,8 @@ class Trader(util.Initializable):
         :param wait_for_creation: when True, always make sure the order is completely created before returning.
         On exchanges async api, a create request will return before the order is actually live on exchange, in this case
         the associated order state will make sure that the order is creating by polling the order from the exchange.
+        :param raise_all_creation_error: when True, will raise each ceation error when possible
+        (instead of retuning None)
         :param creation_timeout: time before raising a timeout error when waiting for an order creation
         :return: The crated order instance
         """
@@ -119,31 +122,41 @@ class Trader(util.Initializable):
                 self.logger.warning(f"Order not created on {self.exchange_manager.exchange_name} "
                                     f"(failed attempt to create: {order}). This is likely due to "
                                     f"the order being refused by the exchange.")
-        except (errors.MissingFunds, errors.AuthenticationError, errors.ExchangeCompliancyError):
+        except (
+            errors.MissingFunds, errors.AuthenticationError,
+            errors.ExchangeCompliancyError, errors.OrderCreationError
+        ):
             # forward errors that require actions to fix the situation
             raise
         except Exception as e:
+            if raise_all_creation_error:
+                raise
             self.logger.exception(e, True, f"Unexpected error when creating order: {e}. Order: {order}")
             return None
 
         return created_order
 
-    async def create_artificial_order(self, order_type, symbol, current_price, quantity, price,
-                                      emit_trading_signals=False,
-                                      wait_for_creation=True,
-                                      creation_timeout=octobot_trading.constants.INDIVIDUAL_ORDER_SYNC_TIMEOUT):
+    async def create_artificial_order(
+        self, order_type, symbol, current_price, quantity, price, reduce_only, close_position,
+        emit_trading_signals=False, wait_for_creation=True,
+        creation_timeout=octobot_trading.constants.INDIVIDUAL_ORDER_SYNC_TIMEOUT
+    ):
         """
         Creates an OctoBot managed order (managed orders example: stop loss that is not published on the exchange and
         that is maintained internally).
         """
-        order = order_factory.create_order_instance(trader=self,
-                                                    order_type=order_type,
-                                                    symbol=symbol,
-                                                    current_price=current_price,
-                                                    quantity=quantity,
-                                                    price=price)
+        order = order_factory.create_order_instance(
+            trader=self,
+            order_type=order_type,
+            symbol=symbol,
+            current_price=current_price,
+            quantity=quantity,
+            price=price,
+            reduce_only=reduce_only,
+            close_position=close_position,
+        )
         async with signals.remote_signal_publisher(self.exchange_manager, order.symbol, emit_trading_signals):
-            await signals.create_order(
+            return await signals.create_order(
                 self.exchange_manager,
                 emit_trading_signals and signals.should_emit_trading_signal(self.exchange_manager),
                 order,
@@ -170,38 +183,23 @@ class Trader(util.Initializable):
         previous_exchange_order_id = order.exchange_order_id
         try:
             async with order.lock:
+                disabled_state_updater = self.exchange_manager.exchange_personal_data \
+                    .orders_manager.enable_order_auto_synchronization is False
                 # now that we got the lock, ensure we can edit the order
-                if not self.simulate and not order.is_self_managed() and order.state is not None:
-                    # careful here: make sure we are not editing an order on exchange that is being updated
-                    # somewhere else
-                    async with order.state.refresh_operation():
-                        self.logger.info(f"Editing order: {order} ["
-                                         f"edited_quantity: {str(edited_quantity)} "
-                                         f"edited_price: {str(edited_price)} "
-                                         f"edited_stop_price: {str(edited_stop_price)} "
-                                         f"edited_current_price: {str(edited_current_price)}"
-                                         f"]")
-                        order_params = self.exchange_manager.exchange.get_order_additional_params(order)
-                        order_params.update(params or {})
-                        # fill in every param as some exchange rely on re-creating the order altogether
-                        edited_order = await self.exchange_manager.exchange.edit_order(
-                            order.exchange_order_id,
-                            order.order_type,
-                            order.symbol,
-                            quantity=order.origin_quantity if edited_quantity is None else edited_quantity,
-                            price=order.origin_price if edited_price is None else edited_price,
-                            stop_price=edited_stop_price,
-                            side=order.side,
-                            current_price=edited_current_price,
-                            params=order_params
+                if not self.simulate and not order.is_self_managed() and (
+                    order.state is not None or disabled_state_updater
+                ):
+                    if disabled_state_updater:
+                        changed = await self._edit_order_on_exchange(
+                            order, edited_quantity, edited_price, edited_stop_price, edited_current_price, params
                         )
-                        # apply new values from returned order (even order id might have changed)
-                        self.logger.debug(f"Successfully edited order on {self.exchange_manager.exchange_name}, "
-                                          f"new order values: {edited_order}")
-                        changed = order.update_from_raw(edited_order)
-                        # update portfolio from exchange
-                        await self.exchange_manager.exchange_personal_data.\
-                            handle_portfolio_and_position_update_from_order(order)
+                    else:
+                        # careful here: make sure we are not editing an order on exchange that is being updated
+                        # somewhere else
+                        async with order.state.refresh_operation():
+                            changed = await self._edit_order_on_exchange(
+                                order, edited_quantity, edited_price, edited_stop_price, edited_current_price, params
+                            )
                 else:
                     # consider order as cancelled to release portfolio amounts
                     self.exchange_manager.exchange_personal_data.portfolio_manager.portfolio.update_portfolio_available(
@@ -228,6 +226,41 @@ class Trader(util.Initializable):
             if previous_exchange_order_id != order.exchange_order_id:
                 # order id changed: update orders_manager to keep consistency
                 self.exchange_manager.exchange_personal_data.orders_manager.replace_order(order.order_id, order)
+
+    async def _edit_order_on_exchange(
+        self, order,
+        edited_quantity: decimal.Decimal,
+        edited_price: decimal.Decimal,
+        edited_stop_price: decimal.Decimal,
+        edited_current_price: decimal.Decimal,
+        params: dict
+    ) -> bool:
+        self.logger.info(
+            f"Editing order: {order} [edited_quantity: {str(edited_quantity)} edited_price: {str(edited_price)} "
+            f"edited_stop_price: {str(edited_stop_price)} edited_current_price: {str(edited_current_price)}]"
+        )
+        order_params = self.exchange_manager.exchange.get_order_additional_params(order)
+        order_params.update(params or {})
+        # fill in every param as some exchange rely on re-creating the order altogether
+        edited_order = await self.exchange_manager.exchange.edit_order(
+            order.exchange_order_id,
+            order.order_type,
+            order.symbol,
+            quantity=order.origin_quantity if edited_quantity is None else edited_quantity,
+            price=order.origin_price if edited_price is None else edited_price,
+            stop_price=edited_stop_price,
+            side=order.side,
+            current_price=edited_current_price,
+            params=order_params
+        )
+        # apply new values from returned order (even order id might have changed)
+        self.logger.debug(
+            f"Successfully edited order on {self.exchange_manager.exchange_name}, new order values: {edited_order}"
+        )
+        changed = order.update_from_raw(edited_order)
+        # update portfolio from exchange
+        await self.exchange_manager.exchange_personal_data.handle_portfolio_and_position_update_from_order(order)
+        return changed
 
     async def _create_new_order(self, new_order, params: dict,
                                 wait_for_creation=True,
@@ -379,6 +412,7 @@ class Trader(util.Initializable):
             # order will just never get created
             order.is_waiting_for_chained_trigger = False
             return success
+        order_status = None
         # if real order: cancel on exchange
         if not self.simulate and not order.is_self_managed():
             try:
@@ -398,8 +432,15 @@ class Trader(util.Initializable):
                             order.exchange_order_id, order.symbol, order.order_type
                         )
             except errors.OrderCancelError as err:
-                if await self._handle_order_cancel_error(order, err, wait_for_cancelling, cancelling_timeout):
-                    return True
+                if self.exchange_manager.exchange_personal_data.orders_manager.enable_order_auto_synchronization:
+                    if await self._handle_order_cancel_error(order, err, wait_for_cancelling, cancelling_timeout):
+                        return True
+                else:
+                    self.logger.warning(
+                        f"Impossible to cancel order ({err} {err.__class__.__name__}). "
+                        f"Considering order as cancelled {order}"
+                    )
+                    order_status = enums.OrderStatus.CANCELED
             except Exception as err:
                 self.logger.exception(err, True, f"Failed to cancel order {order}")
                 return False
@@ -592,9 +633,9 @@ class Trader(util.Initializable):
         return all_cancelled, cancelled_orders
 
     async def cancel_all_open_orders_with_currency(
-            self, currency, emit_trading_signals=False,
-            wait_for_cancelling=True,
-            cancelling_timeout=octobot_trading.constants.INDIVIDUAL_ORDER_SYNC_TIMEOUT
+        self, currency, emit_trading_signals=False,
+        wait_for_cancelling=True,
+        cancelling_timeout=octobot_trading.constants.INDIVIDUAL_ORDER_SYNC_TIMEOUT
     ) -> bool:
         """
         Should be called only if the goal is to cancel all open orders for each traded symbol containing the
@@ -769,13 +810,16 @@ class Trader(util.Initializable):
         async with self.exchange_manager.exchange_personal_data.portfolio_manager.portfolio.lock:
             await self.exchange_manager.exchange_personal_data.handle_portfolio_update_from_withdrawal(amount, currency)
 
-    async def set_leverage(self, symbol, side, leverage):
+    async def set_leverage(
+        self, symbol: str, side: typing.Optional[enums.PositionSide], leverage: decimal.Decimal
+    ) -> bool:
         """
         Updates the symbol contract leverage
         Can raise InvalidLeverageValue if leverage value is not matching requirements
         :param symbol: the symbol to update
         :param side: the side to update (TODO)
         :param leverage: the new leverage value
+        :return True if leverage changed
         """
         contract = self.exchange_manager.exchange.get_pair_future_contract(symbol)
         if not contract.check_leverage_update(leverage):
@@ -783,12 +827,11 @@ class Trader(util.Initializable):
                                               f"but maximal value is {contract.maximum_leverage}")
         if contract.current_leverage != leverage:
             if not self.simulate:
-                await self.exchange_manager.exchange.set_symbol_leverage(
-                    symbol=symbol,
-                    leverage=leverage
-                )
+                await self.exchange_manager.exchange.set_symbol_leverage(symbol, float(leverage))
             self.logger.info(f"Switching {symbol} leverage from {contract.current_leverage} to {leverage}")
             contract.set_current_leverage(leverage)
+            return True
+        return False
 
     async def set_symbol_take_profit_stop_loss_mode(self, symbol, new_mode: enums.TakeProfitStopLossMode):
         """

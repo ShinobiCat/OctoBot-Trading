@@ -17,6 +17,7 @@ import abc
 import contextlib
 import decimal
 import copy
+import typing
 
 import octobot_commons.constants as common_constants
 import octobot_commons.enums as common_enums
@@ -32,6 +33,7 @@ import octobot_tentacles_manager.configuration as tm_configuration
 
 import octobot_trading.constants as constants
 import octobot_trading.enums as enums
+import octobot_trading.errors as errors
 import octobot_trading.exchange_channel as exchanges_channel
 import octobot_trading.modes.modes_factory as modes_factory
 import octobot_trading.modes.channel.abstract_mode_producer as abstract_mode_producer
@@ -534,6 +536,13 @@ class AbstractTradingMode(abstract_tentacle.AbstractTentacle):
             common_constants.DEFAULT_IGNORED_VALUE
         )
 
+    def ensure_supported(self, symbol):
+        if self.exchange_manager.is_future:
+            try:
+                self.exchange_manager.exchange.pair_contracts[symbol].ensure_supported_configuration()
+            except KeyError:
+                raise errors.ContractExistsError(f"Missing contract for {symbol}")
+
     @contextlib.asynccontextmanager
     async def remote_signal_publisher(self, symbol: str):
         async with signals.remote_signal_publisher(self.exchange_manager, symbol, self.should_emit_trading_signal()) \
@@ -583,6 +592,13 @@ class AbstractTradingMode(abstract_tentacle.AbstractTentacle):
             edited_stop_price=edited_stop_price,
             edited_current_price=edited_current_price,
             params=params
+        )
+
+    async def set_leverage(
+        self, symbol: str, side: typing.Optional[enums.PositionSide], leverage: decimal.Decimal
+    ) -> bool:
+        return await signals.set_leverage(
+            self.exchange_manager, self.should_emit_trading_signal(), symbol, side, leverage
         )
 
     async def get_additional_metadata(self, is_backtesting):

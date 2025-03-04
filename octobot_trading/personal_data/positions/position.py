@@ -240,7 +240,7 @@ class Position(util.Initializable):
         try:
             with self.update_or_restore():
                 if mark_price is not None:
-                    self._update_mark_price(mark_price)
+                    self._update_mark_price(mark_price, force_entry_check=bool(update_size or update_margin))
                 if update_margin is not None:
                     self._update_size_from_margin(update_margin)
                 if update_size is not None:
@@ -265,27 +265,27 @@ class Position(util.Initializable):
         self._on_size_update(size_update, realised_pnl_update, self.unrealized_pnl, False)
         await self.close()
 
-    def _update_mark_price(self, mark_price, check_liquidation=True):
+    def _update_mark_price(self, mark_price, check_liquidation=True, force_entry_check=False):
         """
         Updates position mark_price and triggers size related attributes update
         :param mark_price: the update mark_price
         """
         self.mark_price = mark_price
-        self._update_prices_if_necessary(mark_price)
+        self._update_prices_if_necessary(mark_price, force_entry_check=force_entry_check)
         if check_liquidation:
             self._check_for_liquidation()
         if not self.is_idle() and self.exchange_manager.is_simulated:
             self.update_value()
             self.update_pnl()
 
-    def _update_prices_if_necessary(self, mark_price):
+    def _update_prices_if_necessary(self, mark_price, force_entry_check=False):
         """
         Update the position entry price and mark price when their value is 0 or when the position is new
         :param mark_price: the current mark_price
         """
         if self.mark_price == constants.ZERO:
             self.mark_price = mark_price
-        if self.entry_price == constants.ZERO:
+        if self.entry_price == constants.ZERO and (force_entry_check or not self.is_idle()):
             self.entry_price = mark_price
 
     def _update_size_from_margin(self, margin_update):
@@ -312,7 +312,7 @@ class Position(util.Initializable):
                 or (self.is_short() and order.is_short())
         )
 
-    def update_from_order(self, order):
+    async def update_from_order(self, order):
         """
         Update position size and entry price from filled order portfolio
         :param order: the filled order instance
@@ -320,7 +320,7 @@ class Position(util.Initializable):
         """
         # consider the order filled price as the current reference price for pnl computation
         # do not check liquidation as our position might be closed by this order
-        self._update_mark_price(order.filled_price, check_liquidation=False)
+        self._update_mark_price(order.filled_price, check_liquidation=False, force_entry_check=True)
 
         # get size to close to check if closing
         size_to_close = self.get_quantity_to_close()
@@ -354,6 +354,9 @@ class Position(util.Initializable):
 
         # update size and realised pnl
         self._update_size(size_update, realised_pnl_update=realised_pnl_fees_update, trigger_source=trigger_source)
+        if size_to_close and self.is_idle():
+            # don't keep previous position pnl etc when position is now idle
+            await self.close()
 
     def _update_realized_pnl_from_order(self, order):
         """
@@ -743,6 +746,9 @@ class Position(util.Initializable):
     def update_from_raw(self, raw_position):
         symbol = str(raw_position.get(enums.ExchangeConstantsPositionColumns.SYMBOL.value, None))
         currency, market = self.exchange_manager.get_exchange_quote_and_base(symbol)
+        position_id = (
+            self.position_id or raw_position.get(enums.ExchangeConstantsPositionColumns.LOCAL_ID.value) or symbol
+        )
         # side is managed locally, do not parse it
         return self._update(
             symbol=symbol,
@@ -760,7 +766,7 @@ class Position(util.Initializable):
             auto_deposit_margin=raw_position.get(
                 enums.ExchangeConstantsPositionColumns.AUTO_DEPOSIT_MARGIN.value, False
             ),
-            position_id=self.position_id or symbol,
+            position_id=position_id,
             exchange_position_id=str(raw_position.get(enums.ExchangeConstantsPositionColumns.ID.value, None) or symbol),
             timestamp=raw_position.get(enums.ExchangeConstantsPositionColumns.TIMESTAMP.value, 0),
             unrealized_pnl=raw_position.get(enums.ExchangeConstantsPositionColumns.UNREALIZED_PNL.value,

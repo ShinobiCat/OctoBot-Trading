@@ -76,11 +76,20 @@ class ExchangeSimulatorConnector(abstract_exchange.AbstractExchange):
             return market[enums.ExchangeConstantsMarketStatusColumns.SYMBOL.value] in self.symbols
 
         self._forced_market_statuses = ccxt_client_simulation.parse_markets(
-            self.exchange_manager.exchange_class_string, market_filter
+            self._get_exchange_class_rest_name(), market_filter
         )
+
+    def _get_exchange_class_rest_name(self):
+        if self.exchange_manager.exchange.exchange_tentacle_class:
+            return self.exchange_manager.exchange.exchange_tentacle_class.get_rest_name(self.exchange_manager)
+        return self.exchange_manager.exchange_class_string
 
     def should_adapt_market_statuses(self) -> bool:
         return self.exchange_manager.use_cached_markets
+
+    def get_contract_size(self, symbol: str):
+        market_status, _ = self.get_market_status(symbol, with_fixer=False)
+        return ccxt_client_simulation.get_contract_size(market_status)
 
     @classmethod
     def load_user_inputs_from_class(cls, tentacles_setup_config, tentacle_config):
@@ -149,7 +158,7 @@ class ExchangeSimulatorConnector(abstract_exchange.AbstractExchange):
                     return util.ExchangeMarketStatusFixer(
                         self._forced_market_statuses[symbol], price_example
                     ).market_status
-                return self._forced_market_statuses[symbol]
+                return self._forced_market_statuses[symbol], True
             except KeyError:
                 self._missing_market_statuses.add(symbol)
                 if len(self._missing_market_statuses) >= len(self.symbols) - 1:
@@ -160,7 +169,7 @@ class ExchangeSimulatorConnector(abstract_exchange.AbstractExchange):
                     )
                 else:
                     self.logger.warning(f"Missing cached market status for {symbol}: using default market status")
-        return self._get_default_market_status()
+        return self._get_default_market_status(), False
 
     def _get_default_market_status(self):
         return {

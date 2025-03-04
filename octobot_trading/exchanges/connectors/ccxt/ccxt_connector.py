@@ -18,6 +18,7 @@ import contextlib
 import decimal
 import ccxt.async_support as ccxt
 import ccxt.static_dependencies.ecdsa.der
+import aiohttp_socks
 import typing
 import inspect
 import binascii
@@ -81,7 +82,7 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
 	custom_base_url=None
     ):
         super().__init__(config, exchange_manager, None)
-        self.client = None
+        self.client: ccxt.Exchange = None
         self.exchange_type = None
         self.adapter = self.get_adapter_class(adapter_class)(self)
         self.all_currencies_price_ticker = None
@@ -134,7 +135,7 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
                 )
 
             # initialize symbols and timeframes
-            self.symbols = self.get_client_symbols(active_only=True)
+            self.symbols = self.exchange_manager.exchange.get_all_available_symbols(active_only=True)
             self.time_frames = self.get_client_time_frames()
 
         except (ccxt.ExchangeNotAvailable, ccxt.RequestTimeout) as e:
@@ -216,7 +217,7 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
                 else:
                     raise
 
-    def get_client_symbols(self, active_only=True):
+    def get_client_symbols(self, active_only=True) -> set[str]:
         return ccxt_client_util.get_symbols(self.client, active_only)
 
     def get_client_time_frames(self):
@@ -275,7 +276,8 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
     def _should_authenticate(self):
         return self.force_authentication or not (
             self.exchange_manager.is_simulated or
-            self.exchange_manager.is_backtesting
+            self.exchange_manager.is_backtesting or
+            not self.exchange_manager.is_trading
         )
 
     def unauthenticated_exchange_fallback(self, err):
@@ -681,7 +683,18 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
     ) -> enums.OrderStatus:
         try:
             with self.error_describer():
-                await self.client.cancel_order(exchange_order_id, symbol=symbol, params=kwargs)
+                try:
+                    await self.client.cancel_order(exchange_order_id, symbol=symbol, params=kwargs)
+                except Exception as err:
+                    if self.exchange_manager.exchange.is_exchange_order_uncancellable(err):
+                        # handle ExchangeOrderCancelError locally not to raise it from other contexts
+                        # (such as if used in error_describer)
+                        raise octobot_trading.errors.ExchangeOrderCancelError(
+                            f"Error when handling order {html_util.get_html_summary_if_relevant(err)}. "
+                            f"Exchange is refusing to cancel this order. The order is probably filled "
+                            f"or cancelled already."
+                        ) from err
+                    raise
                 # no exception, cancel worked
             try:
                 # make sure order is canceled
@@ -716,6 +729,9 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
             raise octobot_trading.errors.NotSupported(
                 html_util.get_html_summary_if_relevant(e)
             ) from e
+        except octobot_trading.errors.ExchangeOrderCancelError:
+            # propagate error
+            raise
         except Exception as e:
             self.logger.exception(
                 e,
@@ -813,12 +829,19 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
         raise RuntimeError(f"Unknown order type: {order_type}")
 
     def get_trade_fee(self, symbol: str, order_type: enums.TraderOrderType, quantity, price, taker_or_maker):
-        fees = self.client.calculate_fee(symbol=symbol,
-                                         type=order_type,
-                                         side=exchanges.get_order_side(order_type),
-                                         amount=float(quantity),
-                                         price=float(price),
-                                         takerOrMaker=taker_or_maker)
+        limit_or_market_order_type = (
+            enums.TradeOrderType.MARKET
+            if taker_or_maker == enums.ExchangeConstantsMarketPropertyColumns.TAKER.value
+            else enums.TradeOrderType.LIMIT
+        )
+        fees = self.client.calculate_fee(
+            symbol=symbol,
+            type=limit_or_market_order_type.value,
+            side=exchanges.get_order_side(order_type),
+            amount=float(quantity),
+            price=float(price),
+            takerOrMaker=taker_or_maker
+        )
         fees[enums.FeePropertyColumns.IS_FROM_EXCHANGE.value] = False
         fees[enums.FeePropertyColumns.COST.value] = decimal.Decimal(
             str(fees.get(enums.FeePropertyColumns.COST.value) or 0)
@@ -984,6 +1007,21 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
         # 15 pairs, each on 3 time frames
         return 45
 
+    def raise_or_prefix_proxy_error_if_relevant(self, cause_error: Exception, raised_error: typing.Optional[Exception]):
+        """
+        Will raise octobot_trading.errors.ExchangeProxyError when the error is linked to a proxy
+        server of configuration issue.
+        Will re-raise a "[Proxied request] " prefix given error message if relevant, otherwise will just raise the error
+        """
+        if proxy_error := ccxt_client_util.get_proxy_error_if_any(self, cause_error):
+            raise octobot_trading.errors.ExchangeProxyError(proxy_error) from cause_error
+        # when api key is wrong or proxy is unavailable
+        ccxt_client_util.reraise_with_proxy_prefix_if_relevant(self, cause_error, raised_error)
+        # reraise_with_proxy_prefix_if_relevant did not raise, raise the error as is
+        if raised_error is None:
+            raise cause_error
+        raise raised_error from cause_error
+
     def log_ddos_error(self, error):
         self.logger.error(
             f"DDoSProtection triggered [{html_util.get_html_summary_if_relevant(error)} ({error.__class__.__name__})]. "
@@ -998,29 +1036,44 @@ class CCXTConnector(abstract_exchange.AbstractExchange):
     def error_describer(self):
         try:
             yield
-        except ccxt.DDoSProtection as e:
+        except ccxt.DDoSProtection as err:
             # raised upon rate limit issues, last response data might have details on what is happening
-            if self.exchange_manager.exchange.should_log_on_ddos_exception(e):
-                self.log_ddos_error(e)
-            raise
+            if self.exchange_manager.exchange.should_log_on_ddos_exception(err):
+                self.log_ddos_error(err)
+            self.raise_or_prefix_proxy_error_if_relevant(err, None)
         except ccxt.InvalidNonce as err:
             # use 2 index to get the caller of the context manager
             caller_function_name = inspect.stack()[2].function
             exchanges.log_time_sync_error(self.logger, self.name, err, caller_function_name)
             raise octobot_trading.errors.FailedRequest(html_util.get_html_summary_if_relevant(err)) from err
-        except ccxt.RequestTimeout as e:
+        except ccxt.RequestTimeout as err:
             raise octobot_trading.errors.FailedRequest(
-                f"Request timeout: {html_util.get_html_summary_if_relevant(e)}"
-            ) from e
-        except ccxt.AuthenticationError as err:
-            raise octobot_trading.errors.AuthenticationError(html_util.get_html_summary_if_relevant(err)) from err
-        except ccxt.ExchangeNotAvailable as err:
-            raise octobot_trading.errors.FailedRequest(
-                f"Failed to execute request: {err.__class__.__name__}: {html_util.get_html_summary_if_relevant(err)}"
+                f"Request timeout: {html_util.get_html_summary_if_relevant(err)}"
             ) from err
+        except ccxt.AuthenticationError as err:
+            error_class = (
+                octobot_trading.errors.InvalidAPIKeyIPWhitelistError
+                if self.exchange_manager.exchange.is_ip_whitelist_error(err)
+                else octobot_trading.errors.AuthenticationError
+            )
+            self.raise_or_prefix_proxy_error_if_relevant(
+                err,
+                error_class(html_util.get_html_summary_if_relevant(err))
+            )
+        except (ccxt.ExchangeNotAvailable, aiohttp_socks.ProxyConnectionError) as err:
+            self.raise_or_prefix_proxy_error_if_relevant(
+                err,
+                octobot_trading.errors.FailedRequest(
+                    f"Failed to execute request: {err.__class__.__name__}: {html_util.get_html_summary_if_relevant(err)}"
+                )
+            )
         except ccxt.ExchangeError as err:
+            error_message = html_util.get_html_summary_if_relevant(err)
+            if self.exchange_manager.exchange.is_ip_whitelist_error(err):
+                # ensure this is not an IP whitelist error
+                raise octobot_trading.errors.InvalidAPIKeyIPWhitelistError(error_message) from err
             if self.exchange_manager.exchange.is_authentication_error(err):
                 # ensure this is not an unhandled authentication error
-                raise octobot_trading.errors.AuthenticationError(html_util.get_html_summary_if_relevant(err)) from err
+                raise octobot_trading.errors.AuthenticationError(error_message) from err
             # otherwise just forward exception
             raise

@@ -36,6 +36,7 @@ def create_order_signal_content(
         trading_enums.TradingSignalOrdersAttrs.EXCHANGE.value: exchange_manager.exchange_name,
         trading_enums.TradingSignalOrdersAttrs.EXCHANGE_TYPE.value: exchanges.get_exchange_type(exchange_manager).value,
         trading_enums.TradingSignalOrdersAttrs.SIDE.value: order.side.value,
+        trading_enums.TradingSignalOrdersAttrs.TRIGGER_ABOVE.value: order.trigger_above,
         trading_enums.TradingSignalOrdersAttrs.TYPE.value: order.order_type.value,
         trading_enums.TradingSignalOrdersAttrs.QUANTITY.value: float(order.origin_quantity),
         trading_enums.TradingSignalOrdersAttrs.TARGET_AMOUNT.value: target_amount
@@ -70,4 +71,19 @@ def create_order_signal_content(
         trading_enums.TradingSignalOrdersAttrs.CHAINED_TO.value:
             None if order.triggered_by is None else order.triggered_by.order_id,
         trading_enums.TradingSignalOrdersAttrs.ADDITIONAL_ORDERS.value: [],
+    }
+
+
+def create_position_signal_content(
+    action, strategy, exchange_manager, symbol, side, leverage
+) -> dict:
+    # only use order.order_id to identify orders in signals (exchange_order_id is local and never shared)
+    return {
+        trading_enums.TradingSignalCommonsAttrs.ACTION.value: action.value,
+        trading_enums.TradingSignalPositionsAttrs.STRATEGY.value: strategy,
+        trading_enums.TradingSignalPositionsAttrs.EXCHANGE.value: exchange_manager.exchange_name,
+        trading_enums.TradingSignalPositionsAttrs.EXCHANGE_TYPE.value: exchanges.get_exchange_type(exchange_manager).value,
+        trading_enums.TradingSignalPositionsAttrs.SYMBOL.value: symbol,
+        trading_enums.TradingSignalPositionsAttrs.SIDE.value: side.value if side else side,
+        trading_enums.TradingSignalPositionsAttrs.LEVERAGE.value: float(leverage),
     }

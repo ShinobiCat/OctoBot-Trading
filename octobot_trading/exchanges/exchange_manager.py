@@ -30,20 +30,21 @@ import octobot_trading.enums as enums
 import octobot_trading.util as util
 import octobot_trading.errors as errors
 import octobot_trading.storage as storage
+import trading_backend.exchanges
 
 
 class ExchangeManager(util.Initializable):
     def __init__(self, config, exchange_class_string):
         super().__init__()
-        self.id = str(uuid.uuid4())
-        self.bot_id = None
-        self.config = config
+        self.id : str= str(uuid.uuid4())
+        self.bot_id: str = None
+        self.config: dict = config
         self.tentacles_setup_config = None
-        self.exchange_class_string = exchange_class_string
-        self.exchange_name = exchange_class_string
+        self.exchange_class_string: str = exchange_class_string
+        self.exchange_name: str = exchange_class_string
         self.logger = logging.get_logger(self.__class__.__name__)
 
-        self.is_ready = False
+        self.is_ready: bool = False
         self.is_simulated: bool = False
         self.is_backtesting: bool = False
         self.rest_only: bool = False
@@ -56,6 +57,7 @@ class ExchangeManager(util.Initializable):
         self.is_sandboxed: bool = False
         self.is_trading: bool = True
         self.without_auth: bool = False
+        self.disable_unauth_retry: bool = False
         self.check_credentials: bool = True
         self.enable_storage: bool = True
         self.proxy_config: exchanges.ProxyConfig = exchanges.ProxyConfig.default_env_var_config()
@@ -65,24 +67,24 @@ class ExchangeManager(util.Initializable):
 
         self.backtesting = None
 
-        self.is_trader_simulated = util.is_trader_simulator_enabled(self.config)
-        self.has_websocket = False
+        self.is_trader_simulated: bool = util.is_trader_simulator_enabled(self.config)
+        self.has_websocket: bool = False
 
-        self.trader = None
-        self.exchange = None
-        self.exchange_backend = None
-        self.is_broker_enabled = False
-        self.trading_modes = []
+        self.trader: exchanges.Trader = None
+        self.exchange: exchanges.RestExchange = None
+        self.exchange_backend: trading_backend.exchanges.Exchange = None
+        self.is_broker_enabled: bool = False
+        self.trading_modes: list = []
 
         self.exchange_web_socket = None
 
-        self.client_symbols = []
-        self.client_time_frames = []
+        self.client_symbols: list[str] = []
+        self.client_time_frames: list[str] = []
 
-        self.storage_manager = storage.StorageManager(self)
-        self.exchange_config = exchanges.ExchangeConfig(self)
-        self.exchange_personal_data = personal_data.ExchangePersonalData(self)
-        self.exchange_symbols_data = exchange_data.ExchangeSymbolsData(self)
+        self.storage_manager: storage.StorageManager = storage.StorageManager(self)
+        self.exchange_config: exchanges.ExchangeConfig = exchanges.ExchangeConfig(self)
+        self.exchange_personal_data: personal_data.ExchangePersonalData = personal_data.ExchangePersonalData(self)
+        self.exchange_symbols_data: exchange_data.ExchangeSymbolsData = exchange_data.ExchangeSymbolsData(self)
 
         self.debug_info = {}
 
@@ -322,9 +324,9 @@ class ExchangeManager(util.Initializable):
             common_constants.CONFIG_EXCHANGE_SECRET, config_exchange, None
         )
         return (
-            # remove leading and trailing ", ' and whitespaces if any
-            key.strip(' "').strip("'") if key else key,
-            secret.strip(' "').strip("'") if secret else secret,
+            # remove leading and trailing ", ', newlines and whitespaces if any
+            key.strip(' "').strip("'").strip("\n") if key else key,
+            secret.strip(' "').strip("'").strip("\n") if secret else secret,
             configuration.decrypt_element_if_possible(
                 common_constants.CONFIG_EXCHANGE_PASSWORD, config_exchange, None
             ),

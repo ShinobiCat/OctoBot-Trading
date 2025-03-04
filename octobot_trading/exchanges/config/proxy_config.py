@@ -32,6 +32,14 @@ class ProxyConfig:
     aiohttp_trust_env: bool = octobot_trading.constants.ENABLE_EXCHANGE_HTTP_PROXY_FROM_ENV
     # if set, will be called when exchange stops
     stop_proxy_callback: typing.Optional[typing.Callable] = None
+    # if set, returns the last url given to a callback method that return "True", meaning the last url that used a proxy
+    get_last_proxied_request_url: typing.Optional[typing.Callable[[], typing.Optional[str]]] = None
+    get_proxy_url: typing.Optional[typing.Callable[[], str]] = None
+    # the host of this proxy, used to identify proxy connexion errors
+    proxy_host: str = "DEFAULT PROXY HOST"
+    # if DNS cache should be disabled with this proxy config. Warning: in this case, DNS cache will be
+    # completely disabled for this exchange
+    disable_dns_cache: bool = False
 
     @classmethod
     def default_env_var_config(cls):
